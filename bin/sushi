@@ -162,7 +162,7 @@ EOF
   echo "$conf" | \
       sed 's/$service'"/$service/g" | \
       sed 's/$user'"/$user/g" | \
-      sed 's/$cmd_alias'"/${name^^}/g"
+      sed 's/$cmd_alias'"/${user^^}_${name^^}/g"
 }
 
 setup_nginx_vhost(){

@@ -126,7 +126,7 @@ Since we're going to use postgres we need to create a postgres user
 that is allowed to create databases.
 ```Shell
 [local] $ ssh -t bitmunge.com \
-  "sudo su - postgres -c 'createuser --createdb ops_user'" && \
+  "sudo su - postgres -c 'createuser --createdb ops_user'"
 ```
 
 ### Repo setup
@@ -238,10 +238,10 @@ By creating this file with the following content our deploy user
 will be able to run these commands and only these commands as super user.
 
 ```Shell
-[local] $ ssh -t bitmunge.com "sudo visudo -f /etc/sudoers.d/ops_user"
+[local] $ ssh -t bitmunge.com "sudo visudo -f /etc/sudoers.d/ops_user-ruby_test_app"
 ```
 ```Shell
-Cmnd_Alias HANDLE_PUBLICAPI = \
+Cmnd_Alias OPS_USER_RUBY_TEST_APP = \
     /bin/systemctl start   ruby_test_app.service, \
     /bin/systemctl stop    ruby_test_app.service, \
     /bin/systemctl status  ruby_test_app.service, \
@@ -251,7 +251,7 @@ Cmnd_Alias HANDLE_PUBLICAPI = \
     /usr/bin/journalctl -u ruby_test_app.service, \
     /usr/bin/journalctl -u ruby_test_app.service -f
 
-ops_user ALL = (root) NOPASSWD: HANDLE_PUBLICAPI
+ops_user ALL = (root) NOPASSWD: OPS_USER_RUBY_TEST_APP
 ```
 
 
