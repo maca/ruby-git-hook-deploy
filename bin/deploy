@@ -4,6 +4,7 @@
 bundle config set --local deployment 'true'
 bundle config set --local path '../vendor'
 bundle install
+bundle exec rake db:create
 bundle exec rake db:migrate
 
 
