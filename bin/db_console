@@ -1,0 +1,40 @@
+#!/usr/bin/env ruby
+
+require_relative "../app/vouchers.rb"
+
+class PGConsole
+  attr_accessor :config
+
+  def initialize(config)
+    self.config = config
+  end
+
+  def run
+    exec "#{pg_env} psql #{database}"
+  end
+
+  private
+
+  def pg_env
+    env = {}
+    env['PGHOST']     = config['host']
+    env['PGPORT']     = config['port']
+    env['PGPASSWORD'] = config['password']
+    env['PGUSER']     = config['username']
+    env['PGUSER']   ||= config['user']
+    env.compact.map { |key, val| "#{key}=#{val}" }.join(' ')
+  end
+
+  def database
+    Shellwords.escape(config['database'])
+  end
+
+  class << self
+    def run(config)
+      PGConsole.new(config).run
+    end
+  end
+end
+
+config = ActiveRecord::Base.configurations[Vouchers::Base.environment.to_s]
+PGConsole.run(config)

@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+
+
+bundle config set --local deployment 'true'
+bundle config set --local path '../vendor'
+bundle install
+bundle exec rake db:migrate
+
+
+if [ -e "../service" ]; then rm -rf "../service"; fi
+cp -a ./ ../service
+
+
+sudo systemctl restart ruby_test_app.service

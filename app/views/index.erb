@@ -1,0 +1,21 @@
+<section>
+  <h1>Posts</h1>
+
+  <div>
+    <% Post.all.each do |post| %>
+      <h3><%= post.author %></h3>
+      <p><%= post.content %></p>
+    <% end %>
+  </div>
+</section>
+
+<section>
+  <h1>Env</h1>
+
+  <dl>
+    <% ENV.each do |key, val| %>
+      <dt><%= key %></dt>
+      <dd><%= val.inspect %></dd>
+    <% end %>
+  </dl>
+</section>

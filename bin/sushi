@@ -1,0 +1,313 @@
+#!/usr/bin/env sh
+# A shell script to perform web app deployments with git hooks
+# Macario Ortega
+# -------------------------------------------------------
+
+
+while getopts ":r:" opt; do
+  case ${opt} in
+    r ) remote=$OPTARG ;;
+    \? ) echo "Invalid option: $OPTARG" 1>&2 ;;
+    : ) echo "Invalid option: $OPTARG requires an argument" 1>&2 ;;
+  esac
+done
+shift $((OPTIND -1))
+
+
+remote=${remote:-`git config sushi.remote`}
+task=$1
+shift 2>/dev/null
+
+
+eval $(git remote get-url $remote | sed -e "s#^\(\(.*\)://\)\?\(\([^:@]*\)\(:\(.*\)\)\?@\)\?\([^/?]*\)\(/\(.*\)\)\?#user='\4' host='\7' repo_path=/'\9'#")
+
+
+if [ -z "$repo_path" ]; then
+  >&2 echo "try adding git remote '$remote'"
+  exit 2;
+fi
+
+
+base_path=$(dirname $repo_path)
+build_path=$base_path/build_dir
+env_path=$base_path/env
+service_path=$base_path/service
+name=$(basename $base_path)
+service="$name.service"
+domain=$(git config sushi.domain)
+domain=$(echo ${domain:-$name.$host} | tr '_' '-')
+color_n=$(tput sgr0)
+color_h=$(tput setaf 3)
+prompt="\033[1;33m>>>\033[0m "
+
+
+
+as_sudoer(){
+  ssh -o LogLevel=QUIET -t $host "$1"
+}
+
+as_user(){
+  ssh -o LogLevel=QUIET -t $user@$host "$1"
+}
+
+systemctl(){
+  as_user "sudo systemctl $1 $service"
+}
+
+run(){
+  cmd=$(cat <<EOF
+cd $service_path
+set -a
+source ../env
+`git config sushi.run` $@
+EOF
+)
+  as_user "$cmd"
+}
+
+env_sanitize(){
+  var="[[:alpha:]|_][[:alnum:]|_]*"
+  quoted1="'([^']|(?<=\\\)')*'"
+  quoted2="\"([^\"]|(?<=\\\)\")*\""
+  bare="[^[:space:]]*"
+  assign="^$var=($quoted1|$quoted2|$bare)[[:space:]]*$"
+  blank="^[[:space:]]*$"
+  comment="^#.*$"
+  pattern="$assign|$blank|$comment"
+
+  grep -P $pattern $1
+}
+
+env_edit(){
+  tmp_file="/tmp/$name-env-`date +%s`"
+  env_file=$user@$host:$env_path
+
+  scp $env_file $tmp_file > /dev/null
+
+  ${EDITOR:-nano} $tmp_file
+  sanitized=$(env_sanitize $tmp_file)
+
+  echo "$sanitized"
+  echo "$sanitized" > $tmp_file
+
+  scp $tmp_file $env_file > /dev/null
+  rm $tmp_file
+}
+
+setup_git_hook(){
+  conf=$(cat <<EOF
+#!/usr/bin/env sh
+
+# only deploy on master
+if [ "\$1" = "refs/heads/master" ]; then
+  mkdir -p $build_path
+  git --work-tree=$build_path --git-dir=$repo_path checkout -f \$3
+  cd $build_path
+
+  set -a
+  source $env_path
+
+  PS4="$color_h>>> $color_n" sh -ex bin/deploy
+  exit_code=\$?
+  rm $build_path -rf
+  exit \$exit_code
+fi
+
+EOF
+)
+
+  echo "$conf"
+}
+
+setup_systemd_unit(){
+  conf=$(cat <<EOF
+[Unit]
+Description=Run $name
+After=network.target
+
+[Service]
+WorkingDirectory=$service_path
+ExecStart=$service_path/bin/run
+Restart=always
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=$name
+User=$user
+EnvironmentFile=$env_path
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)
+
+  echo "$conf"
+}
+
+setup_sudo(){
+  conf=$(cat <<"EOF"
+Cmnd_Alias $cmd_alias = \
+    /bin/systemctl start   $service, \
+    /bin/systemctl stop    $service, \
+    /bin/systemctl status  $service, \
+    /bin/systemctl enable  $service, \
+    /bin/systemctl disable $service, \
+    /bin/systemctl restart $service, \
+    /usr/bin/journalctl -u $service, \
+    /usr/bin/journalctl -u $service -f
+
+$user ALL = (root) NOPASSWD: $cmd_alias
+EOF
+)
+
+  echo "$conf" | \
+      sed 's/$service'"/$service/g" | \
+      sed 's/$user'"/$user/g" | \
+      sed 's/$cmd_alias'"/${name^^}/g"
+}
+
+setup_nginx_vhost(){
+  conf=$(cat <<EOF
+upstream $name {
+    server unix:/tmp/$name.sock;
+}
+
+server {
+    server_name $domain;
+    listen 80;
+
+    location / {
+        proxy_pass http://$name;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header Host \$http_host;
+        proxy_redirect off;
+    }
+}
+EOF
+)
+
+  echo "$conf"
+}
+
+
+setup(){
+  ssh_key_tmp_file="/tmp/$name-ssh.pub-`date +%s`"
+  git_hook_tmp_file="/tmp/$name-git-hook-`date +%s`"
+  systemd_unit_tmp_file="/tmp/$name-systemd-unit-`date +%s`"
+  sudo_tmp_file="/tmp/$name-sudo-`date +%s`"
+  nginx_vhost_tmp_file="/tmp/$name-nginx-vhost-`date +%s`"
+
+
+  cmd=$(cat <<EOF
+PS4="$color_h>>> $color_n"
+
+set -x
+
+# create user
+sudo useradd -m $user
+
+# add keys to authorized_keys for user
+sudo su $user -c 'mkdir ~/.ssh && chmod 700 ~/.ssh'
+sudo su $user -c 'cat $ssh_key_tmp_file >> ~/.ssh/authorized_keys'
+rm $ssh_key_tmp_file
+
+# create postgres user
+sudo su - postgres -c 'createuser --createdb $user'
+
+# from here stop if any command is not successful
+set -aex
+
+# setup git repository
+sudo su $user -c 'mkdir -p $repo_path'
+sudo su $user -c 'cd $repo_path && git init --bare'
+
+# create env file
+sudo su $user -c 'touch $base_path/env'
+
+# setup git hook
+sudo su $user -c 'touch $base_path/env'
+cat $git_hook_tmp_file | sudo -u $user tee $repo_path/hooks/update
+sudo su $user -c 'chmod +x $repo_path/hooks/update'
+rm $git_hook_tmp_file
+
+# setup sudo
+cat $sudo_tmp_file | sudo tee /etc/sudoers.d/$user-$name
+rm $sudo_tmp_file
+
+# setup systemd unit
+cat $systemd_unit_tmp_file | sudo tee /etc/systemd/system/$service
+rm $systemd_unit_tmp_file
+sudo systemctl enable $service
+
+# setup nginx virtual host
+cat $nginx_vhost_tmp_file | sudo tee /etc/nginx/sites-enabled/$domain
+rm $nginx_vhost_tmp_file
+sudo nginx -t
+
+# setup ssl certificate
+sudo certbot --nginx -d "$domain"
+
+EOF
+)
+  set -e
+
+  scp ~/.ssh/id_rsa.pub $host:$ssh_key_tmp_file > /dev/null
+  echo "$(setup_git_hook)" | ssh $host "cat > $git_hook_tmp_file"
+  echo "$(setup_systemd_unit)" | ssh $host "cat > $systemd_unit_tmp_file"
+  echo "$(setup_sudo)" | ssh $host "cat > $sudo_tmp_file"
+  echo "$(setup_nginx_vhost)" | ssh $host "cat > $nginx_vhost_tmp_file"
+
+  as_sudoer "$cmd"
+}
+
+
+case $task in
+  "ps:start") systemctl start ;;
+  "ps:stop") systemctl stop ;;
+  "ps:status") systemctl status ;;
+  "ps:enable") systemctl enable ;;
+  "ps:disable") systemctl disable ;;
+  "ps:restart") systemctl restart ;;
+  "setup") setup ;;
+  "env") as_user "cat $base_path/env" ;;
+  "env:edit") env_edit ;;
+
+  "logs") as_user "sudo journalctl -u $service" ;;
+  "logs:follow") as_user "sudo journalctl -u $service -f" ;;
+  "run") run $@ ;;
+
+  *)
+    echo "
+Usage: sushi [-r git-remote] task [args1 [args2]]
+  -r git-remote:
+    git remote hosting the app repo and deployment
+
+  task
+    setup       # server set up
+    ps:start    # start process
+    ps:stop     # stop process
+    ps:status   # obtain information on the process status
+    ps:restart  # restart process
+    ps:enable   # enable process startup on server boot
+    ps:disable  # disable process startup on server boot
+    env         # cat environment
+    env:edit    # edit and validate environment \
+locally using ${EDITOR:-"\$EDITOR"}
+    logs        # display latest log entries
+    logs:follow # stream logs in realtime
+    run         # run a command on the server
+        examples:
+          \`$ sushi run rake db:migrate\`
+          \`$ sushi run bin/console\`
+
+Configuration
+  configuration is through git
+    git config sushi.remote # default remote, when not providing -r
+    git config sushi.host   # override default host
+    git config sushi.run    # wrap sushi run command
+       examples:
+          \`$ git config sushi.remote staging\`
+          \`$ git config sushi.run \"bundle exec\"\`
+"
+    exit 1
+    ;;
+esac
